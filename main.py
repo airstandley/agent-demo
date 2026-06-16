@@ -1,7 +1,7 @@
 from src import Agent
 from src import Client
 from src.agent import DeciderAgent
-from src.tooling import tool, tool_registry
+from src.tooling import tool, tool_registry, Tool
 
 from dataclasses import dataclass
 import logging
@@ -43,7 +43,7 @@ Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
             "internal_thoughts": {"type": "string", "required": "False"}
             },
-        tools=tool_registry              
+        tools=tool_registry  # Example of quickly creating an agent using all defined tools              
     )
 
     decider = DeciderAgent(
@@ -57,6 +57,9 @@ Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
             "dance": lambda: print("dancing!!"),
             "none_of_the_above": lambda: print("NONE")
         },
+        tools={
+            "search_web": Tool(search_web)  # Example of creating an agent with limited tool access.
+        }
         options=Options(temperature=0.3)
     )
 
