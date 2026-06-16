@@ -1,5 +1,6 @@
 from src import Agent
 from src import Client
+from src.agent import DeciderAgent
 
 from dataclasses import dataclass
 
@@ -24,7 +25,19 @@ def main() -> None:
             }              
     )
 
+    decider = DeciderAgent(
+        client=client,
+        system_prompt="You are a helpful office assistant.",
+        choices={
+            "summarize": lambda: print("summarizing"),
+            "search_web": lambda: print("searching web"),
+            "translate": lambda: print("translating")
+        },
+        options=Options(temperature=0.3)
+    )
+
     print(agent.generate("Explain what an AI agent is?"))
+    decider.decide("Summerize this article for me.")()
 
 
 

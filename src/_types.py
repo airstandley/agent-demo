@@ -6,18 +6,18 @@ class Message(Protocol):
     content: str | None
     tool: str | None
 
-
+class ModelOptions(Protocol):
+    seed: int | None = None
+    temperature: float | None = None
+    context_window: int | None= None
+    max_tokens: int | None = None
+    
 class Client(Protocol):
 
-    def generate(prompt: str) -> str:
+    def generate(prompt: str, options: ModelOptions|None = None) -> str:
         ...
     
     def chat(message=list[Message]) -> Message:
         ...
 
 
-class ModelOptions(Protocol):
-    seed: int | None = None
-    temperature: float | None = None
-    context_window: int | None= None
-    max_tokens: int | None = None

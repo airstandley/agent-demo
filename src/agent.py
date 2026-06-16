@@ -1,21 +1,29 @@
 # agent.py
 import json
 import logging
-from typing import List, Dict
+from typing import List, Dict, Callable
 
-from ._types import Client
+from ._types import Client, ModelOptions
 
 logger = logging.getLogger(__name__)
 
 class Agent:
 
-    def __init__(self, client: Client, system_prompt: str | None = None, schema: Dict | None = None, tools: List[Dict] = None):
+    def __init__(
+            self, 
+            client: Client, 
+            system_prompt: str | None = None,
+            options: ModelOptions | None = None,
+            schema: Dict | None = None,
+            tools: List[Dict] = None
+        ):
         self.system_prompt = system_prompt
+        self.model_options = options
         self.schema = schema
         self.retries = 3  # Number to times to attempt a valid generation per step
         self.client = client
 
-    def _generate(self, message: str) -> str:
+    def _generate(self, message: str, options: ModelOptions | None = None) -> str:
         prompt = []
         # Add System Prompt for Agents
         if self.system_prompt:
@@ -28,9 +36,10 @@ class Agent:
         if self.schema:
             prompt += [
                 "<FORMAT RULES>",
-                "1. Responses must follow the following schema:",
+                "1. The response MUST be valid JSON",
+                "2. Responses must follow the following schema:",
                 f"{self.schema}",
-                "2. No explanations, no markdown, no extra text before or after the JSON",
+                "3. No explanations, no markdown, no extra text before or after the JSON",
                 "</FORMAT RULES>"
             ]
         # Add user message
@@ -42,7 +51,7 @@ class Agent:
         # Generate the response
         prompt = "\n".join(prompt)
         logger.debug(f"Full Prompt:\n{prompt}")
-        return self.client.generate(prompt)
+        return self.client.generate(prompt, options=options if options is not None else self.model_options)
 
     def _parse_response_for_json(self, response: str) -> Dict:
         # Attempt to wrangle the garbage LLMs can generate into a usable JSON format.
@@ -56,7 +65,7 @@ class Agent:
 
         return json.loads(json_text)
 
-    def generate(self, message: str) -> Dict:
+    def generate(self, message: str, options: ModelOptions | None = None) -> Dict:
         if self.schema:
             for attempt in range(self.retries):
                 response = self._generate(message)
@@ -67,49 +76,35 @@ class Agent:
                     logger.warning(f"LLM Output Parsing Failed! Reason: {e} Text:{response}")
                 else:
                     return parsed
-            raise RuntimeError("The AI can't generate formatted output worth shit")
+            raise RuntimeError("The model failed to generate formatted output")
         else:
-            return self._generate(message)
+            return self._generate(message, options=options)
 
-    def agent_step(user_message: str) -> str:
-        messages = [
-            {"role": "system", "content": "You are a chatbot. Try to truthfully answer user questions. Use tools when needed."},
-            {"role": "user", "content": user_message}
-        ]
 
-        for _ in range(self.max_step_atempts):
-            response = self.client.generate(messages[1]["content"])
+class DeciderAgent(Agent):
 
-            #parsed = extract_json_from_text(response)
-        
-            # if parsed and "action" in parsed:
-            #     if "reason" not in parsed:
-            #         parsed["reason"] = f"Taking action: {parsed['action']}"
-            #     self.state.increment_step()
-            #     return parsed
-            return response
+    def __init__(
+            self, 
+            client: Client, 
+            system_prompt: str = "",
+            choices = Dict[str,Callable],
+            options: ModelOptions | None = None,
+        ):
+        self.choices = choices
+        system_prompt += "\nYou must choose ONE of the following options:\n"
+        system_prompt += "\n".join(choices.keys())
+        schema = {
+            "decision": "|".join(choices.keys())
+        }
+        super().__init__(client, system_prompt=system_prompt, schema=schema, options=options)
 
-    def run_loop(user_message: str, max_steps: int = 8) -> str:
-        
-        for _ in range(max_steps):
-            # Step 1: Send message to LLM
-            response = llm.generate(messages)  # Use Ollama via `OllamaLLM`
-            message = response["choices"][0]["message"]
-            # Append to conversation history
-            messages.append(message)
-            # Step 2: Check if LLM wants to call a tool
-            if not message.tool_calls:
-                return message.content  # Final answer, no more tools
-            # Step 3: Execute each tool call
-            for tool_call in message.tool_calls:
-                name = tool_call.name
-                args = json.loads(tool_call.function.arguments)
-                # Execute the function (from tools.py)
-                result = call_tool(name, args)
-                # Append result to conversation
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        return "Step budget exceeded without a final answer."
+    def decide(self, question: str, options: ModelOptions | None = None) -> Callable:
+        response = self.generate(question, options=options)
+        try:
+            action = response["decision"]
+            function = self.choices[action]
+        except KeyError:
+            logger.warning(f"Model failed to return a valid response: '{response}'. Schema:{self.schema}")
+            return None
+        else:
+            return function

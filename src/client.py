@@ -28,10 +28,12 @@ class Client:
         self.model: str = model
         self.model_options: LlamaOptions | None = LlamaOptions.create_from_options(options) if options is not None else None
     
-    def generate(self, message: str) -> str:
+    def generate(self, message: str, options: ModelOptions|None = None) -> str:
+        if options is not None:
+            options = LlamaOptions.create_from_options(options)
         response: ollama.GenerateResponse = self.llm.generate(
             model=self.model,
-            options=self.model_options,
+            options=options if options is not None else self.model_options,
             prompt=message,
             stream=False,  # Set to True if you want streaming response
         )
