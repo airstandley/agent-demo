@@ -36,8 +36,7 @@ def main() -> None:
     client = Client(options=options)
     agent = Agent(
         client = client, 
-        system_prompt="""You are a tool calling assistant. Use the tools available to you. To call a tool respond using the 'tool_calls' property.
-Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
+        system_prompt="""Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
         schema={
             "response": {"type": "string", "required": "True"},
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
@@ -46,27 +45,27 @@ Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
         tools=tool_registry  # Example of quickly creating an agent using all defined tools              
     )
 
-    decider = DeciderAgent(
+    decider = Agent(
         client=client,
         system_prompt="You are a helpful office assistant.",
-        choices={
-            "summarize": lambda: print("summarizing"),
-            "search_web": lambda: print("searching web"),
-            "translate": lambda: print("translating"),
-            "eat_cake": lambda: print("eating cake"),
-            "dance": lambda: print("dancing!!"),
-            "none_of_the_above": lambda: print("NONE")
-        },
+        # choices={
+        #     "summarize": lambda: print("summarizing"),
+        #     "search_web": lambda: print("searching web"),
+        #     "translate": lambda: print("translating"),
+        #     "eat_cake": lambda: print("eating cake"),
+        #     "dance": lambda: print("dancing!!"),
+        #     "none_of_the_above": lambda: print("NONE")
+        # },
         tools={
             "search_web": Tool(search_web)  # Example of creating an agent with limited tool access.
-        }
+        },
         options=Options(temperature=0.3)
     )
 
     # print(agent.process("Explain what an AI agent is?"))
     print(agent.process("What is the latest AI agent news?"))
-    print(agent.process("Print README.md"))
-    print(agent.process("What emails have I recieved today?"))
+    #print(agent.process("Print README.md"))
+    #print(agent.process("What emails have I recieved today?"))
     # decider.decide("It's raining today.")()
 
 

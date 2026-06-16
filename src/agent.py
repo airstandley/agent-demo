@@ -1,11 +1,27 @@
 # agent.py
+from enum import StrEnum, EnumMeta
 import json
 import logging
 from typing import List, Dict, Callable
+from dataclasses import dataclass
 
 from ._types import Client, ModelOptions, Tool
 
 logger = logging.getLogger(__name__)
+
+class AgentStateMeta(EnumMeta):
+    def __new__(cls, name, bases, dct):
+        # Add values list to class
+        klass = super().__new__(cls, name, bases, dct)
+        klass.values = [str(value) for value in klass.__members__.values()]
+        return klass
+
+class AgentStates(StrEnum, metaclass=AgentStateMeta):
+    RECIEVED_PROMPT = "recieved_prompt"
+    TAKE_ACTION = "take_action"
+    OBSERVE_ACTION_RESULT = "observe_action_result"
+    GAVE_ANSWER = "gave_answer"
+
 
 class Agent:
 
@@ -15,7 +31,8 @@ class Agent:
             system_prompt: str | None = None,
             options: ModelOptions | None = None,
             schema: Dict | None = None,
-            tools: Dict[Tool] | None = None
+            tools: Dict[Tool] | None = None,
+            stateful: bool = True,
         ):
         self.system_prompt = system_prompt
         self.model_options = options
@@ -24,6 +41,7 @@ class Agent:
         self.client = client
         self.tools = tools
         if self.tools:
+            self.system_prompt = "You are a tooling calling agent. Use the tools available to you. To call a tool respond using the 'tool_calls' property.\n" + self.system_prompt
             self.schema["tool_calls"] = {
                 "type": "array", 
                 "items": {
@@ -35,6 +53,16 @@ class Agent:
                 },
                 "required": "False"
             }
+        self.state = None
+        if stateful:
+            self.state = AgentStates.RECIEVED_PROMPT
+            self.system_prompt = "/n".join([
+                "You are an agent. You must decide on the next action.",
+                "You must choose ONE of the following options:",
+                *AgentStates.values,
+                self.system_prompt
+            ])
+            self.schema["state"] = f"enum({"|".join(AgentStates.values)}"
 
     def _generate(self, message: str, options: ModelOptions | None = None) -> str:
         prompt = []
@@ -44,6 +72,14 @@ class Agent:
                 "<SYSTEM>",
                 self.system_prompt,
                 "</SYSTEM>"
+            ]
+        # Add State Information if Stateful
+        if self.state is not None:
+            prompt += [
+                "<STATE>",
+                f"Current: {self.state}",
+                f"Available States: {",".join(AgentStates.values)}",
+                "</STATE>"
             ]
         # Add Tool Definitions if Defined
         if self.tools:
@@ -104,25 +140,59 @@ class Agent:
         else:
             return self._generate(message, options=options)
     
-    def process(self, message: str) -> Dict | str:
-        response = self.generate(message)
-        if isinstance(response, str):
-            return response
-        if self.tools and "tool_calls" in response:
-            response["tool_results"] = {}
-            tool_calls = response["tool_calls"]
-            logger.info(f"tool_calls: {tool_calls}")
-            for call in tool_calls:
-                try:
-                    name = call["name"]
-                    tool = self.tools[name]
-                    result = tool(*call["arguements"])
-                except Exception as e:
-                    logger.warning(f"Tool Call Failed: {e}")
-                else:
-                    response["tool_results"][name] = result
-        return response
+    def excute_tool_call(self, name: str, arguements: list) -> str:
+        logger.info(f"Tool Call <{name}> Arguements: {arguements}")
+        try:
+            tool = self.tools[name]
+        except KeyError:
+            return f"ValueError: Tool '{name}' does not exist."
+        try:
+            result = tool(*arguements)
+        except Exception as e:
+            logger.warning(f"Tool Call <{name}> Failed: {e}")
+            return f"RuntimeError: Error calling tool '{name}': {e}"
+        else:
+            return result
 
+    def process(self, message: str, max_steps: int = 10) -> Dict | str:
+        # Stateless agents are simple call response
+        if self.state is None:
+            results = [self.generate(message)]
+        else:        
+            self.state = AgentStates.RECIEVED_PROMPT
+            steps = 0
+            results = []
+
+            while self.state != AgentStates.GAVE_ANSWER and steps < max_steps:
+                response = self.generate(message)
+                try:
+                    state = response["state"]
+                except KeyError:
+                    # Assume this was the final answer
+                    state = AgentStates.GAVE_ANSWER
+                
+                match state:
+                    case AgentStates.RECIEVED_PROMPT:
+                        self.state = AgentStates.RECIEVED_PROMPT
+                    case AgentStates.TAKE_ACTION:
+                        if self.tools and "tool_calls" in response:
+                            response["tool_results"] = {}
+                            tool_calls = response["tool_calls"]
+                            for call in tool_calls:
+                                try:
+                                    name = call["name"]
+                                except KeyError:
+                                    response["tool_calls"]["unknown"] = "KeyError: No name given. Please provide 'name' field to call a tool."
+                                try:
+                                    arguements = call["arguements"]
+                                except KeyError:
+                                    arguements = []
+                                response["tool_results"][name] = self.excute_tool_call(name,  arguements)
+                            self.state = AgentStates.OBSERVE_ACTION_RESULT
+                    case AgentStates.GAVE_ANSWER:
+                        self.state = AgentStates.GAVE_ANSWER
+                results.append(response)
+        return results
 
 class DeciderAgent(Agent):
 
@@ -132,6 +202,7 @@ class DeciderAgent(Agent):
             system_prompt: str = "",
             choices = Dict[str,Callable],
             options: ModelOptions | None = None,
+            tools: Dict[Tool] | None = None,
         ):
         self.choices = choices
         system_prompt += "\nYou must choose ONE of the following options:\n"
@@ -139,7 +210,7 @@ class DeciderAgent(Agent):
         schema = {
             "decision": "|".join(choices.keys())
         }
-        super().__init__(client, system_prompt=system_prompt, schema=schema, options=options)
+        super().__init__(client, system_prompt=system_prompt, schema=schema, options=options, tools=tools)
 
     def decide(self, question: str, options: ModelOptions | None = None) -> Callable:
         response = self.generate(question, options=options)
