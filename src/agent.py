@@ -3,7 +3,7 @@ import json
 import logging
 from typing import List, Dict, Callable
 
-from ._types import Client, ModelOptions
+from ._types import Client, ModelOptions, Tool
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +15,26 @@ class Agent:
             system_prompt: str | None = None,
             options: ModelOptions | None = None,
             schema: Dict | None = None,
-            tools: List[Dict] = None
+            tools: Dict[Tool] | None = None
         ):
         self.system_prompt = system_prompt
         self.model_options = options
         self.schema = schema
         self.retries = 3  # Number to times to attempt a valid generation per step
         self.client = client
+        self.tools = tools
+        if self.tools:
+            self.schema["tool_calls"] = {
+                "type": "array", 
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "arguements": {"type": "array"}
+                    }
+                },
+                "required": "False"
+            }
 
     def _generate(self, message: str, options: ModelOptions | None = None) -> str:
         prompt = []
@@ -32,6 +45,13 @@ class Agent:
                 self.system_prompt,
                 "</SYSTEM>"
             ]
+        # Add Tool Definitions if Defined
+        if self.tools:
+            prompt += [
+                "<TOOLS>",
+                "\n".join([str(tool) for tool in self.tools.values()]),
+                "</TOOLS>"
+            ]
         # Add Output Format Restrictions if Defined
         if self.schema:
             prompt += [
@@ -40,6 +60,10 @@ class Agent:
                 "2. Responses must follow the following schema:",
                 f"{self.schema}",
                 "3. No explanations, no markdown, no extra text before or after the JSON",
+            ]
+            if self.tools:
+                prompt += ["4. Requests to call tools can be passed in this formatted response."]
+            prompt += [
                 "</FORMAT RULES>"
             ]
         # Add user message
@@ -65,7 +89,7 @@ class Agent:
 
         return json.loads(json_text)
 
-    def generate(self, message: str, options: ModelOptions | None = None) -> Dict:
+    def generate(self, message: str, options: ModelOptions | None = None) -> Dict | str:
         if self.schema:
             for attempt in range(self.retries):
                 response = self._generate(message)
@@ -79,6 +103,25 @@ class Agent:
             raise RuntimeError("The model failed to generate formatted output")
         else:
             return self._generate(message, options=options)
+    
+    def process(self, message: str) -> Dict | str:
+        response = self.generate(message)
+        if isinstance(response, str):
+            return response
+        if self.tools and "tool_calls" in response:
+            response["tool_results"] = {}
+            tool_calls = response["tool_calls"]
+            logger.info(f"tool_calls: {tool_calls}")
+            for call in tool_calls:
+                try:
+                    name = call["name"]
+                    tool = self.tools[name]
+                    result = tool(*call["arguements"])
+                except Exception as e:
+                    logger.warning(f"Tool Call Failed: {e}")
+                else:
+                    response["tool_results"][name] = result
+        return response
 
 
 class DeciderAgent(Agent):

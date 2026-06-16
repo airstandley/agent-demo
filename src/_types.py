@@ -20,4 +20,6 @@ class Client(Protocol):
     def chat(message=list[Message]) -> Message:
         ...
 
-
+class Tool(Protocol):
+    name: str
+    arguements: dict[str,str]
