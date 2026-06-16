@@ -1,0 +1,8 @@
+# Python
+__pycache__
+
+# VS Code
+.vscode
+
+# Demo Application (Will replace with mock for the public repo later, for now make sure it's not comitted)
+partlab-windows-amd64
