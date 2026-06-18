@@ -3,27 +3,79 @@ from enum import StrEnum, EnumMeta
 import json
 import logging
 from typing import List, Dict, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ._types import Client, ModelOptions, Tool
 
 logger = logging.getLogger(__name__)
 
-class AgentStateMeta(EnumMeta):
+
+
+class AgentActionMeta(EnumMeta):
     def __new__(cls, name, bases, dct):
         # Add values list to class
         klass = super().__new__(cls, name, bases, dct)
         klass.values = [str(value) for value in klass.__members__.values()]
         return klass
 
-class AgentStates(StrEnum, metaclass=AgentStateMeta):
-    RECIEVED_PROMPT = "recieved_prompt"
+class AgentActions(StrEnum, metaclass=AgentActionMeta):
+    REQUEST_PROMPT = "read_user_prompt"
     TAKE_ACTION = "take_action"
-    OBSERVE_ACTION_RESULT = "observe_action_result"
-    GAVE_ANSWER = "gave_answer"
+    GIVE_ANSWER = "give_answer"
+    THROW_ERROR = "throw_error"
+
+    @classmethod
+    def valid_choices(cls) ->  list[AgentActions]:
+        return [
+            cls.TAKE_ACTION,
+            cls.GIVE_ANSWER
+        ]
+
+@dataclass
+class TaskStep:
+    step: int = 0
+    action: AgentActions = AgentActions.REQUEST_PROMPT
+    result: str | None = None
+
+    def __repr__(self):
+        description = ""
+        match self.action:
+            case AgentActions.REQUEST_PROMPT:
+                description = f"I recieved the user prompt and decided to {self.result["action"]} next."
+                if self.result["action"] == AgentActions.REQUEST_PROMPT:
+                    description += " I got confused. I've already read the user prompt. I should not do this again."
+            case AgentActions.TAKE_ACTION:
+                description = f"I used my available tools."
+                if not self.result["tool_calls"]:
+                    description += "But I forgot to specify a tool so got no results."
+                else:
+                    description += "I got the following results:"
+                    for tool in self.result["tool_calls"]:
+                        name, args = tool["name"], tool["arguements"]
+                        result = self.result["tool_results"][name]
+                        description += f"      - {name}({args}):{result}"
+        return f"{self.step}. ({self.action}): {description}"
+
+@dataclass
+class AgentState:
+    steps: list[TaskStep] = field(default_factory=list)
+    step_count: int = 0
+    current_action: AgentActions = AgentActions.REQUEST_PROMPT
+    done: bool = False
+
+    def reset(self):
+        self.steps = list()
+        self.step_count = 0
+        self.current_action = AgentActions.REQUEST_PROMPT
+        self.done = False
 
 
 class Agent:
+### Notes:
+# We're starting to hit highly unreliable behaviour were multiple pointless steps are taken.
+# We'll see if the later lessons help address this, but my current thoughts are that adding more structure could improve the
+# probability of generating useful text outputs. There might also be some tricks to formatting the prompt that would preform better for a given model.
+# It's pretty apparent that this black box apporach is 
 
     def __init__(
             self, 
@@ -34,14 +86,14 @@ class Agent:
             tools: Dict[Tool] | None = None,
             stateful: bool = True,
         ):
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt + "\n"
         self.model_options = options
-        self.schema = schema
+        self.schema = schema or {}
         self.retries = 3  # Number to times to attempt a valid generation per step
         self.client = client
         self.tools = tools
         if self.tools:
-            self.system_prompt = "You are a tooling calling agent. Use the tools available to you. To call a tool respond using the 'tool_calls' property.\n" + self.system_prompt
+            self.system_prompt += "As an agent, tools are available to you (below in <TOOLS>). You use tools when you need to access external resources like a file-system or the internet. To call a tool respond using the 'tool_calls' property.\n"
             self.schema["tool_calls"] = {
                 "type": "array", 
                 "items": {
@@ -55,14 +107,13 @@ class Agent:
             }
         self.state = None
         if stateful:
-            self.state = AgentStates.RECIEVED_PROMPT
-            self.system_prompt = "/n".join([
-                "You are an agent. You must decide on the next action.",
-                "You must choose ONE of the following options:",
-                *AgentStates.values,
-                self.system_prompt
+            self.state = AgentState()
+            self.system_prompt = "\n".join([
+                self.system_prompt,
+                "As an agent you MUST chose an action. The following options are available:",
+                "\n".join([f"- {value}" for value in AgentActions.values if value in AgentActions.valid_choices()])       
             ])
-            self.schema["state"] = f"enum({"|".join(AgentStates.values)}"
+            self.schema["action"] = f"enum({"|".join(AgentActions.values)}"
 
     def _generate(self, message: str, options: ModelOptions | None = None) -> str:
         prompt = []
@@ -72,14 +123,6 @@ class Agent:
                 "<SYSTEM>",
                 self.system_prompt,
                 "</SYSTEM>"
-            ]
-        # Add State Information if Stateful
-        if self.state is not None:
-            prompt += [
-                "<STATE>",
-                f"Current: {self.state}",
-                f"Available States: {",".join(AgentStates.values)}",
-                "</STATE>"
             ]
         # Add Tool Definitions if Defined
         if self.tools:
@@ -104,12 +147,20 @@ class Agent:
             ]
         # Add user message
         prompt += [
-            "<USER>",
+            "<USER PROMPT>",
             message,
-            "</USER>"
+            "</USER PROMPT>"
         ]
+        # Add State Information if Stateful
+        if self.state is not None:
+            prompt += [
+                "<STATE>",
+                "\n".join([str(step) for step in self.state.steps]),
+                "</STATE>"
+            ]
         # Generate the response
         prompt = "\n".join(prompt)
+        prompt += "\n<AGENT RESPONSE>"
         logger.debug(f"Full Prompt:\n{prompt}")
         return self.client.generate(prompt, options=options if options is not None else self.model_options)
 
@@ -159,22 +210,24 @@ class Agent:
         if self.state is None:
             results = [self.generate(message)]
         else:        
-            self.state = AgentStates.RECIEVED_PROMPT
-            steps = 0
+            self.state.reset()
             results = []
 
-            while self.state != AgentStates.GAVE_ANSWER and steps < max_steps:
+            while not self.state.done and self.state.step_count < max_steps:
+                self.state.step_count += 1
+                step = TaskStep(step=self.state.step_count, action=self.state.current_action)
                 response = self.generate(message)
                 try:
-                    state = response["state"]
+                    action = response["action"]
                 except KeyError:
                     # Assume this was the final answer
-                    state = AgentStates.GAVE_ANSWER
+                    action = AgentActions.GIVE_ANSWER
                 
-                match state:
-                    case AgentStates.RECIEVED_PROMPT:
-                        self.state = AgentStates.RECIEVED_PROMPT
-                    case AgentStates.TAKE_ACTION:
+                match action:
+                    case AgentActions.REQUEST_PROMPT:
+                        self.state.current_action = AgentActions.REQUEST_PROMPT
+                    case AgentActions.TAKE_ACTION:
+                        self.state.current_action = AgentActions.TAKE_ACTION
                         if self.tools and "tool_calls" in response:
                             response["tool_results"] = {}
                             tool_calls = response["tool_calls"]
@@ -188,37 +241,13 @@ class Agent:
                                 except KeyError:
                                     arguements = []
                                 response["tool_results"][name] = self.excute_tool_call(name,  arguements)
-                            self.state = AgentStates.OBSERVE_ACTION_RESULT
-                    case AgentStates.GAVE_ANSWER:
-                        self.state = AgentStates.GAVE_ANSWER
+                    case AgentActions.GIVE_ANSWER:
+                        self.state.current_action = AgentActions.GIVE_ANSWER
+                        self.state.done = True
+                    case AgentActions.THROW_ERROR:
+                        logger.warning(f"Agent ran into an error with task: {message}")
+                        self.state.done = True
+                step.result = response
+                self.state.steps.append(step)
                 results.append(response)
         return results
-
-class DeciderAgent(Agent):
-
-    def __init__(
-            self, 
-            client: Client, 
-            system_prompt: str = "",
-            choices = Dict[str,Callable],
-            options: ModelOptions | None = None,
-            tools: Dict[Tool] | None = None,
-        ):
-        self.choices = choices
-        system_prompt += "\nYou must choose ONE of the following options:\n"
-        system_prompt += "\n".join(choices.keys())
-        schema = {
-            "decision": "|".join(choices.keys())
-        }
-        super().__init__(client, system_prompt=system_prompt, schema=schema, options=options, tools=tools)
-
-    def decide(self, question: str, options: ModelOptions | None = None) -> Callable:
-        response = self.generate(question, options=options)
-        try:
-            action = response["decision"]
-            function = self.choices[action]
-        except KeyError:
-            logger.warning(f"Model failed to return a valid response: '{response}'. Schema:{self.schema}")
-            return None
-        else:
-            return function

@@ -1,6 +1,5 @@
 from src import Agent
 from src import Client
-from src.agent import DeciderAgent
 from src.tooling import tool, tool_registry, Tool
 
 from dataclasses import dataclass
@@ -32,11 +31,12 @@ def get_email(max: int):
 
 def main() -> None:
     options = Options(
+        temperature=0.2
     )
     client = Client(options=options)
     agent = Agent(
         client = client, 
-        system_prompt="""Give accurate answers in 1-2 sentences maximum. No elaboration unless asked.""",
+        system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
         schema={
             "response": {"type": "string", "required": "True"},
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
@@ -63,13 +63,24 @@ def main() -> None:
     )
 
     # print(agent.process("Explain what an AI agent is?"))
+    print("\n\n\n")
+    print("Asking for news...")
     print(agent.process("What is the latest AI agent news?"))
-    #print(agent.process("Print README.md"))
-    #print(agent.process("What emails have I recieved today?"))
+    print("\n\n\n")
+    
+    print("\n\n\n")
+    print("Asking to print a document...")
+    print(agent.process("Print README.md"))
+    print("\n\n\n")
+
+    print("\n\n\n")
+    print("Asking to read emails...")
+    print(agent.process("What emails have I recieved today?"))
+    print("\n\n\n")
     # decider.decide("It's raining today.")()
 
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
     main()
