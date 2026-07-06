@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict, Callable
 from dataclasses import dataclass, field
 
-from ._types import Client, ModelOptions, Tool
+from ._types import Client, ModelOptions, Tool, MemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +23,21 @@ class AgentActions(StrEnum, metaclass=AgentActionMeta):
     TAKE_ACTION = "take_action"
     GIVE_ANSWER = "give_answer"
     THROW_ERROR = "throw_error"
+    STORE_MEMORY = "store_memory"
+    RETRIEVE_MEMORIES = "retrieve_memories"
 
     @classmethod
-    def valid_choices(cls) ->  list[AgentActions]:
-        return [
+    def valid_choices(cls, has_memory: bool = False) ->  list[AgentActions]:
+        actions = [
             cls.TAKE_ACTION,
             cls.GIVE_ANSWER
         ]
+        if has_memory:
+            actions += [
+                cls.STORE_MEMORY,
+                cls.RETRIEVE_MEMORIES
+            ]
+        return actions
 
 @dataclass
 class TaskStep:
@@ -39,9 +47,14 @@ class TaskStep:
 
     def __repr__(self):
         description = ""
+         
         match self.action:
             case AgentActions.REQUEST_PROMPT:
-                description = f"I recieved the user prompt and decided to {self.result["action"]} next."
+                try:
+                    next_action = self.result["action"]
+                except KeyError:
+                    next_action = AgentActions.TAKE_ACTION
+                description = f"I recieved the user prompt and decided to {next_action} next."
                 if self.result["action"] == AgentActions.REQUEST_PROMPT:
                     description += " I got confused. I've already read the user prompt. I should not do this again."
             case AgentActions.TAKE_ACTION:
@@ -51,9 +64,28 @@ class TaskStep:
                 else:
                     description += "I got the following results:"
                     for tool in self.result["tool_calls"]:
-                        name, args = tool["name"], tool["arguements"]
-                        result = self.result["tool_results"][name]
+                        try:
+                            name, args = tool["name"], tool["arguements"]
+                        except KeyError:
+                            name, args = "UNKNOWN", ""
+                        if name:
+                            try:
+                                result = self.result["tool_results"][name]
+                            except KeyError:
+                                result = ""
                         description += f"      - {name}({args}):{result}"
+            case AgentActions.STORE_MEMORY:
+                try:
+                    context = self.result["context"]
+                except KeyError:
+                    context = ""
+                description = f"I stored '{context}' in my memory"
+            case AgentActions.RETRIEVE_MEMORIES:
+                try:
+                    context = self.result["context"]
+                except KeyError:
+                    context = "everything I remember"
+                description = f"I retrieved information about '{context}' from my memory"
         return f"{self.step}. ({self.action}): {description}"
 
 @dataclass
@@ -85,6 +117,7 @@ class Agent:
             schema: Dict | None = None,
             tools: Dict[Tool] | None = None,
             stateful: bool = True,
+            memory_store: MemoryStore | None = None,
         ):
         self.system_prompt = system_prompt + "\n"
         self.model_options = options
@@ -93,7 +126,7 @@ class Agent:
         self.client = client
         self.tools = tools
         if self.tools:
-            self.system_prompt += "As an agent, tools are available to you (below in <TOOLS>). You use tools when you need to access external resources like a file-system or the internet. To call a tool respond using the 'tool_calls' property.\n"
+            self.system_prompt += "\nAs an agent, tools are available to you (below in <TOOLS>). You use tools when you need to access external resources like a file-system or the internet. To call a tool respond using the 'tool_calls' property."
             self.schema["tool_calls"] = {
                 "type": "array", 
                 "items": {
@@ -108,12 +141,34 @@ class Agent:
         self.state = None
         if stateful:
             self.state = AgentState()
+            available_actions = [value for value in AgentActions.values if value in AgentActions.valid_choices(has_memory=memory_store is not None)]
             self.system_prompt = "\n".join([
                 self.system_prompt,
+                "",
                 "As an agent you MUST chose an action. The following options are available:",
-                "\n".join([f"- {value}" for value in AgentActions.values if value in AgentActions.valid_choices()])       
+                "\n".join([f"- {value}" for value in available_actions]),   
             ])
-            self.schema["action"] = f"enum({"|".join(AgentActions.values)}"
+            self.schema["action"] = f"enum({"|".join(available_actions)}"
+        elif memory_store:
+            raise ValueError("Can not create a non-stateful Agent with memory.")
+        
+        self.memory_store = memory_store
+        self.active_memories = []
+        if self.memory_store is not None:
+            self.system_prompt = "\n".join([
+                self.system_prompt,
+                "",
+                "You are an agent with memory. You can store and retrieve memories as an action. 'context' for memories is given your response.",
+                "Information you've retried from your memories is below in <MEMORY>",
+                self.memory_store.prompt_instructions(),
+                "CRITICAL INSTRUCTIONS:",
+                "1. If the user tells you information (like their name), save it to memory",
+                "2. If the user asks about something you might remember, USE YOUR MEMORY to answer",
+            ])
+            self.schema["context"] = {
+                "type": "string",
+                "description": f"Context for memory storage or retrieve. Should be blank unless action is one of ({AgentActions.STORE_MEMORY}|{AgentActions.RETRIEVE_MEMORIES})"
+            }
 
     def _generate(self, message: str, options: ModelOptions | None = None) -> str:
         prompt = []
@@ -123,6 +178,13 @@ class Agent:
                 "<SYSTEM>",
                 self.system_prompt,
                 "</SYSTEM>"
+            ]
+        # Add memories if available
+        if self.memory_store:
+            prompt += [
+                "<MEMORIES>",
+                "You remember the following: \n" + "\n".join(self.active_memories) if self.active_memories else "You have no memories yet.",
+                "</MEMORIES>"
             ]
         # Add Tool Definitions if Defined
         if self.tools:
@@ -137,7 +199,7 @@ class Agent:
                 "<FORMAT RULES>",
                 "1. The response MUST be valid JSON",
                 "2. Responses must follow the following schema:",
-                f"{self.schema}",
+                f"{json.dumps(self.schema)}",
                 "3. No explanations, no markdown, no extra text before or after the JSON",
             ]
             if self.tools:
@@ -161,8 +223,10 @@ class Agent:
         # Generate the response
         prompt = "\n".join(prompt)
         prompt += "\n<AGENT RESPONSE>"
-        logger.debug(f"Full Prompt:\n{prompt}")
-        return self.client.generate(prompt, options=options if options is not None else self.model_options)
+        logger.info(f"Full Prompt:\n'''\n{prompt}\n'''")
+        response = self.client.generate(prompt, options=options if options is not None else self.model_options)
+        logger.info(f"Full Response:\n'''\n{response}\n'''")
+        return response
 
     def _parse_response_for_json(self, response: str) -> Dict:
         # Attempt to wrangle the garbage LLMs can generate into a usable JSON format.
@@ -222,12 +286,11 @@ class Agent:
                 except KeyError:
                     # Assume this was the final answer
                     action = AgentActions.GIVE_ANSWER
-                
+                self.state.current_action = action
                 match action:
                     case AgentActions.REQUEST_PROMPT:
-                        self.state.current_action = AgentActions.REQUEST_PROMPT
+                        pass
                     case AgentActions.TAKE_ACTION:
-                        self.state.current_action = AgentActions.TAKE_ACTION
                         if self.tools and "tool_calls" in response:
                             response["tool_results"] = {}
                             tool_calls = response["tool_calls"]
@@ -241,8 +304,31 @@ class Agent:
                                 except KeyError:
                                     arguements = []
                                 response["tool_results"][name] = self.excute_tool_call(name,  arguements)
+                    case AgentActions.STORE_MEMORY:
+                        if not self.memory_store:
+                            logger.warning(f"Agent ({self}) without memory store tried to save a memory.")
+                            continue
+                        try:
+                            context = response["context"]
+                        except KeyError:
+                            # Repeat step
+                            self.current_action = self.state.steps[-1].action
+                            continue
+                        self.memory_store.save_memory(context)
+                        logger.info(f"Stored Memory: {context}")
+                    case AgentActions.RETRIEVE_MEMORIES:
+                        if not self.memory_store:
+                            logger.warning(f"Agent ({self}) without memory store tried to save a memory.")
+                            continue
+                        try:
+                            context = response["context"]
+                        except KeyError:
+                            # Repeat step
+                            if self.state.steps:
+                                self.current_action = self.state.steps[-1].action
+                            continue
+                        self.active_memories += self.memory_store.retrieve_memories(context=context)
                     case AgentActions.GIVE_ANSWER:
-                        self.state.current_action = AgentActions.GIVE_ANSWER
                         self.state.done = True
                     case AgentActions.THROW_ERROR:
                         logger.warning(f"Agent ran into an error with task: {message}")
@@ -250,4 +336,6 @@ class Agent:
                 step.result = response
                 self.state.steps.append(step)
                 results.append(response)
+        print(f"Final State: {self.state}")
+        print(f"Final Memories: {self.active_memories}")
         return results

@@ -1,6 +1,7 @@
 from src import Agent
 from src import Client
 from src.tooling import tool, tool_registry, Tool
+from src.memory import SimpleMemoryStore
 
 from dataclasses import dataclass
 import logging
@@ -31,9 +32,9 @@ def get_email(max: int):
 
 def main() -> None:
     options = Options(
-        temperature=0.2
+        temperature=0.5
     )
-    client = Client(options=options)
+    client = Client(model="qwen2.5:3b", options=options)
     agent = Agent(
         client = client, 
         system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
@@ -42,42 +43,44 @@ def main() -> None:
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
             "internal_thoughts": {"type": "string", "required": "False"}
             },
-        tools=tool_registry  # Example of quickly creating an agent using all defined tools              
+        tools=tool_registry,  # Example of quickly creating an agent using all defined tools           
+        memory_store=SimpleMemoryStore()   
     )
 
-    decider = Agent(
-        client=client,
-        system_prompt="You are a helpful office assistant.",
-        # choices={
-        #     "summarize": lambda: print("summarizing"),
-        #     "search_web": lambda: print("searching web"),
-        #     "translate": lambda: print("translating"),
-        #     "eat_cake": lambda: print("eating cake"),
-        #     "dance": lambda: print("dancing!!"),
-        #     "none_of_the_above": lambda: print("NONE")
-        # },
-        tools={
-            "search_web": Tool(search_web)  # Example of creating an agent with limited tool access.
-        },
-        options=Options(temperature=0.3)
-    )
+    print("\n\n")
+    print("Introduction...")
+    print(agent.process("Hi there, my name is Alice. What should I call you?")[-1]["response"])
+    print("\n\n")
 
-    # print(agent.process("Explain what an AI agent is?"))
-    print("\n\n\n")
-    print("Asking for news...")
-    print(agent.process("What is the latest AI agent news?"))
-    print("\n\n\n")
+    print("\n\n")
+    print("Recall...")
+    print(agent.process("What is my name?")[-1]["response"])
+    print("\n\n")
+  
+    # print("\n\n")
+    # print("Asking about agents...")
+    # print(agent.process("Explain what an AI agent is?")[-1]["response"])
+    # print("\n\n")
     
-    print("\n\n\n")
-    print("Asking to print a document...")
-    print(agent.process("Print README.md"))
-    print("\n\n\n")
+    # print("\n\n")
+    # print("Asking for news...")
+    # print(agent.process("What is the latest AI agent news?")[-1]["response"])
+    # print("\n\n")
+    
+    # print("\n\n")
+    # print("Asking to print a document...")
+    # print(agent.process("Print README.md")[-1]["response"])
+    # print("\n\n")
 
-    print("\n\n\n")
-    print("Asking to read emails...")
-    print(agent.process("What emails have I recieved today?"))
-    print("\n\n\n")
-    # decider.decide("It's raining today.")()
+    # print("\n\n")
+    # print("Asking to read emails...")
+    # print(agent.process("What emails have I recieved today?")[-1]["response"])
+    # print("\n\n")
+
+    # print("\n\n")
+    # print("Asking the complex task...")
+    # print(agent.process("Print the latest product spec, it should have been emailed to me.")[-1]["response"])
+    # print("\n\n")
 
 
 

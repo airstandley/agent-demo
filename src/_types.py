@@ -23,3 +23,15 @@ class Client(Protocol):
 class Tool(Protocol):
     name: str
     arguements: dict[str,str]
+
+class MemoryStore(Protocol):
+
+    def prompt_instructions(self) -> str:
+        ...
+
+    def save_memory(self, context: str):
+        ...
+    
+    def retrieve_memories(self, context: str | None = None) -> list[str]:
+        ...
+
