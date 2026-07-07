@@ -19,8 +19,8 @@ class AgentActionMeta(EnumMeta):
         return klass
 
 class AgentActions(StrEnum, metaclass=AgentActionMeta):
-    REQUEST_PROMPT = "read_user_prompt"
-    TAKE_ACTION = "take_action"
+    REQUEST_PROMPT = "ask_user"
+    CALL_TOOL = "call_tool"
     GIVE_ANSWER = "give_answer"
     THROW_ERROR = "throw_error"
     STORE_MEMORY = "store_memory"
@@ -29,7 +29,7 @@ class AgentActions(StrEnum, metaclass=AgentActionMeta):
     @classmethod
     def valid_choices(cls, has_memory: bool = False) ->  list[AgentActions]:
         actions = [
-            cls.TAKE_ACTION,
+            cls.CALL_TOOL,
             cls.GIVE_ANSWER
         ]
         if has_memory:
@@ -43,50 +43,14 @@ class AgentActions(StrEnum, metaclass=AgentActionMeta):
 class TaskStep:
     step: int = 0
     action: AgentActions = AgentActions.REQUEST_PROMPT
-    result: str | None = None
+    role: str = "system"
+    result: dict | None = None
 
     def __repr__(self):
-        description = ""
-         
-        match self.action:
-            case AgentActions.REQUEST_PROMPT:
-                try:
-                    next_action = self.result["action"]
-                except KeyError:
-                    next_action = AgentActions.TAKE_ACTION
-                description = f"I recieved the user prompt and decided to {next_action} next."
-                if self.result["action"] == AgentActions.REQUEST_PROMPT:
-                    description += " I got confused. I've already read the user prompt. I should not do this again."
-            case AgentActions.TAKE_ACTION:
-                description = f"I used my available tools."
-                if not self.result["tool_calls"]:
-                    description += "But I forgot to specify a tool so got no results."
-                else:
-                    description += "I got the following results:"
-                    for tool in self.result["tool_calls"]:
-                        try:
-                            name, args = tool["name"], tool["arguements"]
-                        except KeyError:
-                            name, args = "UNKNOWN", ""
-                        if name:
-                            try:
-                                result = self.result["tool_results"][name]
-                            except KeyError:
-                                result = ""
-                        description += f"      - {name}({args}):{result}"
-            case AgentActions.STORE_MEMORY:
-                try:
-                    context = self.result["context"]
-                except KeyError:
-                    context = ""
-                description = f"I stored '{context}' in my memory"
-            case AgentActions.RETRIEVE_MEMORIES:
-                try:
-                    context = self.result["context"]
-                except KeyError:
-                    context = "everything I remember"
-                description = f"I retrieved information about '{context}' from my memory"
-        return f"{self.step}. ({self.action}): {description}"
+        return "\n".join([
+            self.role,
+            str(self.result) or ""
+        ])
 
 @dataclass
 class AgentState:
@@ -122,7 +86,7 @@ class Agent:
             stateful: bool = True,
             memory_store: MemoryStore | None = None,
         ):
-        self.system_prompt = system_prompt + "\n" if system_prompt else ""
+        self.system_prompt = system_prompt + "\n" if system_prompt else "You are a helpful assistant.\n"
         self.model_options = options
         self.schema = schema or {}
         self.retries = 3  # Number to times to attempt a valid generation per step
@@ -136,7 +100,7 @@ class Agent:
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
-                        "arguements": {"type": "array"}
+                        "arguements": {"type": "object"}
                     }
                 },
                 "required": "False"
@@ -224,7 +188,7 @@ class Agent:
             for step in self.state.steps:
                 prompt += [
                     "<MESSAGE>",
-                    "\n".join([str(step) for step in self.state.steps]),
+                    str(step),
                     "</MESSAGE>"
                 ]
         # Generate the response
@@ -262,14 +226,14 @@ class Agent:
         else:
             return self._generate(message, options=options)
     
-    def excute_tool_call(self, name: str, arguements: list) -> str:
+    def excute_tool_call(self, name: str, arguements: dict) -> str:
         logger.info(f"Tool Call <{name}> Arguements: {arguements}")
         try:
             tool = self.tools[name]
         except KeyError:
             return f"ValueError: Tool '{name}' does not exist."
         try:
-            result = tool(*arguements)
+            result = tool(**arguements)
         except Exception as e:
             logger.warning(f"Tool Call <{name}> Failed: {e}")
             return f"RuntimeError: Error calling tool '{name}': {e}"
@@ -286,8 +250,10 @@ class Agent:
 
             while not self.state.done and self.state.step_count < max_steps:
                 self.state.step_count += 1
-                step = TaskStep(step=self.state.step_count, action=self.state.current_action)
+                step = TaskStep(step=self.state.step_count, action=self.state.current_action, role="assistant")
                 response = self.generate(message)
+                step.result = response
+                self.state.steps.append(step)
                 try:
                     action = response["action"]
                 except KeyError:
@@ -297,20 +263,28 @@ class Agent:
                 match action:
                     case AgentActions.REQUEST_PROMPT:
                         pass
-                    case AgentActions.TAKE_ACTION:
+                    case AgentActions.CALL_TOOL:
+                        call_results = []
                         if self.tools and "tool_calls" in response:
-                            response["tool_results"] = {}
                             tool_calls = response["tool_calls"]
                             for call in tool_calls:
                                 try:
                                     name = call["name"]
                                 except KeyError:
-                                    response["tool_calls"]["unknown"] = "KeyError: No name given. Please provide 'name' field to call a tool."
+                                    continue
                                 try:
                                     arguements = call["arguements"]
                                 except KeyError:
                                     arguements = []
-                                response["tool_results"][name] = self.excute_tool_call(name,  arguements)
+                                tool_response = self.excute_tool_call(name,arguements)
+                                call_results.append({
+                                    "name": name,
+                                    "arguements": arguements,
+                                    "result": tool_response
+                                })
+                            self.state.steps.append(TaskStep(
+                                step=self.state.step_count, action=AgentActions.CALL_TOOL, role="tool", result=call_results
+                            ))
                     case AgentActions.STORE_MEMORY:
                         if not self.memory_store:
                             logger.warning(f"Agent ({self}) without memory store tried to save a memory.")
@@ -322,7 +296,9 @@ class Agent:
                             self.current_action = self.state.steps[-1].action
                             continue
                         self.memory_store.save_memory(context)
-                        logger.info(f"Stored Memory: {context}")
+                        self.state.steps.append(TaskStep(
+                                step=self.state.step_count, action=AgentActions.CALL_TOOL, role="system", result=f"Memory saved:\n{context}"
+                            ))
                     case AgentActions.RETRIEVE_MEMORIES:
                         if not self.memory_store:
                             logger.warning(f"Agent ({self}) without memory store tried to save a memory.")
@@ -334,14 +310,17 @@ class Agent:
                             if self.state.steps:
                                 self.current_action = self.state.steps[-1].action
                             continue
-                        self.active_memories += self.memory_store.retrieve_memories(context=context)
+                        memory = self.memory_store.retrieve_memories(context=context)
+                        self.state.steps.append(TaskStep(
+                                step=self.state.step_count, action=AgentActions.RETRIEVE_MEMORIES, role="system", result=f"Memory returned:\n{memory}"
+                            ))
+                        self.active_memories += memory
                     case AgentActions.GIVE_ANSWER:
                         self.state.done = True
                     case AgentActions.THROW_ERROR:
                         logger.warning(f"Agent ran into an error with task: {message}")
                         self.state.done = True
-                step.result = response
-                self.state.steps.append(step)
+                
                 results.append(response)
         print(f"Final State: {self.state}")
         print(f"Final Memories: {self.active_memories}")

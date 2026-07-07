@@ -36,15 +36,14 @@ def main() -> None:
     )
     client = Client(model="qwen2.5:3b", options=options)
     agent = Agent(
-        client = client,
-        stateful=False, 
-        # system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
+        client = client, 
+        system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
         schema={
             "chat_response": {"type": "string", "required": "True"},
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
             "internal_thoughts": {"type": "string", "required": "False"}
             },
-        # tools=tool_registry,  # Example of quickly creating an agent using all defined tools           
+        tools=tool_registry,  # Example of quickly creating an agent using all defined tools           
         # memory_store=SimpleMemoryStore()   
     )
 
@@ -67,13 +66,13 @@ def main() -> None:
     
     # print("\n\n")
     # print("Asking for news...")
-    # print(agent.process("What is the latest AI agent news?")[-1]["response"])
+    # print(agent.process("What is the latest AI agent news?")[-1]["chat_response"])
     # print("\n\n")
     
-    # print("\n\n")
-    # print("Asking to print a document...")
-    # print(agent.process("Print README.md")[-1]["response"])
-    # print("\n\n")
+    print("\n\n")
+    print("Asking to print a document...")
+    print(agent.process("Print README.md only one time. Do not print more than one copy")[-1]["chat_response"])
+    print("\n\n")
 
     # print("\n\n")
     # print("Asking to read emails...")
