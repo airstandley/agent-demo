@@ -36,26 +36,29 @@ def main() -> None:
     )
     client = Client(model="qwen2.5:3b", options=options)
     agent = Agent(
-        client = client, 
-        system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
+        client = client,
+        stateful=False, 
+        # system_prompt="""You are an executive office assistant. Give accurate concise answers. No elaboration unless asked. Do not make up information.""",
         schema={
-            "response": {"type": "string", "required": "True"},
+            "chat_response": {"type": "string", "required": "True"},
             "certainty": {"type": "enum('low' | 'med' | 'high')", "required": "True"},
             "internal_thoughts": {"type": "string", "required": "False"}
             },
-        tools=tool_registry,  # Example of quickly creating an agent using all defined tools           
-        memory_store=SimpleMemoryStore()   
+        # tools=tool_registry,  # Example of quickly creating an agent using all defined tools           
+        # memory_store=SimpleMemoryStore()   
     )
 
-    print("\n\n")
-    print("Introduction...")
-    print(agent.process("Hi there, my name is Alice. What should I call you?")[-1]["response"])
-    print("\n\n")
+    print(agent.generate("What are you?"))
 
-    print("\n\n")
-    print("Recall...")
-    print(agent.process("What is my name?")[-1]["response"])
-    print("\n\n")
+    # print("\n\n")
+    # print("Introduction...")
+    # print(agent.process("Hi there, my name is Alice. What should I call you?")[-1]["response"])
+    # print("\n\n")
+
+    # print("\n\n")
+    # print("Recall...")
+    # print(agent.process("What is my name?")[-1]["response"])
+    # print("\n\n")
   
     # print("\n\n")
     # print("Asking about agents...")
@@ -85,5 +88,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.INFO)
     main()
